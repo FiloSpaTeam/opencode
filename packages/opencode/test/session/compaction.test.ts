@@ -625,6 +625,62 @@ describe("session.compaction.create", () => {
 
 describe("session.compaction.prune", () => {
   it.live(
+    "does not count command receipts as turns when pruning tool output",
+    provideTmpdirInstance(
+      (dir) =>
+        Effect.gen(function* () {
+          const compact = yield* SessionCompaction.Service
+          const ssn = yield* SessionNs.Service
+          const info = yield* ssn.create({})
+          const first = yield* createUserMessage(info.id, "first")
+          const assistant = yield* createAssistantMessage(info.id, first.id, dir)
+          const tool = yield* ssn.updatePart({
+            id: PartID.ascending(),
+            messageID: assistant.id,
+            sessionID: info.id,
+            type: "tool",
+            callID: crypto.randomUUID(),
+            tool: "bash",
+            state: {
+              status: "completed",
+              input: {},
+              output: "x".repeat(200_000),
+              title: "done",
+              metadata: {},
+              time: { start: Date.now(), end: Date.now() },
+            },
+          })
+          yield* createUserMessage(info.id, "second")
+          const receipt = yield* ssn.updateMessage({
+            id: MessageID.ascending(),
+            role: "user",
+            commandReceipt: "receipt-demo",
+            sessionID: info.id,
+            agent: "build",
+            model: ref,
+            time: { created: Date.now() },
+          })
+          yield* ssn.updatePart({
+            id: PartID.ascending(),
+            messageID: receipt.id,
+            sessionID: info.id,
+            type: "text",
+            text: "handled",
+          })
+
+          yield* compact.prune({ sessionID: info.id })
+
+          const stored = yield* ssn.getPart({ sessionID: info.id, messageID: assistant.id, partID: tool.id })
+          expect(stored?.type).toBe("tool")
+          if (stored?.type === "tool" && stored.state.status === "completed") {
+            expect(stored.state.time.compacted).toBeUndefined()
+          }
+        }),
+      { config: { compaction: { prune: true } } },
+    ),
+  )
+
+  it.live(
     "compacts old completed tool output",
     provideTmpdirInstance(
       (dir) =>

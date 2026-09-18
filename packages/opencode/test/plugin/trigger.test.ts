@@ -106,3 +106,43 @@ describe("plugin.trigger", () => {
     ),
   )
 })
+
+it.instance("command interception awaits plugins in order and discards unconsumed receipts", () =>
+  Effect.gen(function* () {
+    const plugin = yield* Plugin.Service
+    const hooks = yield* plugin.list()
+    const seen: string[] = []
+    hooks.push(
+      {
+        "command.execute.intercept": async (_input, output) => {
+          await Promise.resolve()
+          seen.push("decline")
+          output.receipt = "not consumed"
+        },
+      },
+      {
+        "command.execute.intercept": async (_input, output) => {
+          seen.push("consume")
+          expect(output.receipt).toBeUndefined()
+          output.handled = true
+        },
+      },
+      {
+        "command.execute.intercept": async () => {
+          seen.push("too late")
+        },
+      },
+    )
+    const result = yield* plugin.trigger(
+      "command.execute.intercept",
+      {
+        command: "receipt-demo",
+        sessionID: "ses_test",
+        arguments: "raw",
+      },
+      { handled: false, receipt: undefined as string | undefined },
+    )
+    expect(result).toEqual({ handled: true, receipt: undefined })
+    expect(seen).toEqual(["decline", "consume"])
+  }),
+)

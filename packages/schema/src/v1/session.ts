@@ -331,6 +331,8 @@ const messageBase = {
 
 export const User = Schema.Struct({
   ...messageBase,
+  /** Host-owned command receipt, excluded from model history and continuation. */
+  commandReceipt: optional(Schema.String),
   role: Schema.Literal("user"),
   time: Schema.Struct({
     created: Timestamp,

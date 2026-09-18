@@ -54,6 +54,8 @@ export type WorkspaceAdapter = {
 }
 
 export type PluginInput = {
+  /** Runtime feature detection; absent on older hosts. */
+  capabilities?: { commandExecuteIntercept?: boolean }
   client: ReturnType<typeof createOpencodeClient>
   project: Project
   directory: string
@@ -259,6 +261,15 @@ export interface Hooks {
     output: { headers: Record<string, string> },
   ) => Promise<void>
   "permission.ask"?: (input: Permission, output: { status: "ask" | "deny" | "allow" }) => Promise<void>
+  /**
+   * Runs for registered commands before argument, shell or attachment expansion.
+   * Set handled to true to stop dispatch and store one host-owned receipt.
+   * This API does not establish human provenance. Do not also write a receipt.
+   */
+  "command.execute.intercept"?: (
+    input: { command: string; sessionID: string; arguments: string },
+    output: { handled: boolean; receipt?: string },
+  ) => Promise<void>
   "command.execute.before"?: (
     input: { command: string; sessionID: string; arguments: string },
     output: { parts: Part[] },

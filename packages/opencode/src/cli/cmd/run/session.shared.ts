@@ -133,6 +133,7 @@ function turn(msg: SessionMessages[number]): Turn | undefined {
   if (msg.info.role !== "user") {
     return undefined
   }
+  if (msg.info.commandReceipt !== undefined) return undefined
 
   return {
     prompt: messagePrompt(msg),

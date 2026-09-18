@@ -112,6 +112,21 @@ if (sseTypesPatched === sseTypesSource) {
 }
 await Bun.write(sseTypesPath, sseTypesPatched)
 
+// The retained v1 client is not regenerated from the current API (its parameter
+// names differ). Keep its command receipt types compatible with the same endpoint.
+const legacyTypesFile = Bun.file("./src/gen/types.gen.ts")
+const legacyTypes = await legacyTypesFile.text()
+const legacyReceiptTypes = legacyTypes
+  .replace(/(export type UserMessage = \{\n)(?:  commandReceipt\?: string\n)?/, "$1  commandReceipt?: string\n")
+  .replace(/(export type SessionCommandResponses = \{[\s\S]*?\n    info: )(?:AssistantMessage|Message)/, "$1Message")
+if (
+  !legacyReceiptTypes.includes("  commandReceipt?: string") ||
+  !/export type SessionCommandResponses = \{[\s\S]*?\n    info: Message\n/.test(legacyReceiptTypes)
+) {
+  throw new Error("Legacy command receipt type patch did not apply")
+}
+await Bun.write(legacyTypesFile, legacyReceiptTypes)
+
 await $`bun prettier --write src/gen`
 await $`bun prettier --write src/v2`
 await $`rm -rf dist`

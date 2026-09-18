@@ -78,7 +78,9 @@ export function createTimelineModel(input: {
 
   return {
     history: { loadOlder, loading, more },
-    lastUserMessage: createMemo(() => visibleUserMessages().at(-1)),
+    lastUserMessage: createMemo(() =>
+      visibleUserMessages().findLast((message) => message.commandReceipt === undefined),
+    ),
     messages,
     ready,
     resource,

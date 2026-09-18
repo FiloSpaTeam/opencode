@@ -151,6 +151,7 @@ const layer = Layer.effect(
         })
         const cfg = yield* config.get()
         const input: PluginInput = {
+          capabilities: { commandExecuteIntercept: true },
           client,
           project: ctx.project,
           worktree: ctx.worktree,
@@ -292,6 +293,11 @@ const layer = Layer.effect(
         const fn = hook[name] as any
         if (!fn) continue
         yield* Effect.promise(async () => fn(input, output))
+        if (name === "command.execute.intercept") {
+          const result = output as { handled: boolean; receipt?: string }
+          if (result.handled === true) break
+          result.receipt = undefined
+        }
       }
       return output
     })

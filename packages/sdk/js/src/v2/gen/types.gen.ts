@@ -239,6 +239,7 @@ export type OutputFormat = OutputFormatText | OutputFormatJsonSchema
 export type UserMessage = {
   id: string
   sessionID: string
+  commandReceipt?: string
   role: "user"
   time: {
     created: number
@@ -10235,7 +10236,7 @@ export type SessionCommandResponses = {
    * Created message
    */
   200: {
-    info: AssistantMessage
+    info: Message
     parts: Array<Part>
   }
 }

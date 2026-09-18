@@ -626,10 +626,26 @@ const layer = Layer.effect(
         }
       }
       const match = yield* sessions
-        .findMessage(sessionID, (m) => m.info.role === "user" && !!m.info.model)
+        .findMessage(sessionID, (m) => m.info.role === "user" && m.info.commandReceipt === undefined && !!m.info.model)
         .pipe(Effect.orDie)
       if (Option.isSome(match) && match.value.info.role === "user") return match.value.info.model
       return yield* provider.defaultModel().pipe(Effect.orDie)
+    })
+
+    const receiptModel = Effect.fnUntraced(function* (session: Session.Info) {
+      if (session.model) {
+        return {
+          providerID: session.model.providerID,
+          modelID: session.model.id,
+          ...(session.model.variant && session.model.variant !== "default" ? { variant: session.model.variant } : {}),
+        }
+      }
+      const match = yield* sessions
+        .findMessage(session.id, (m) => m.info.role === "user" && m.info.commandReceipt === undefined)
+        .pipe(Effect.orDie)
+      if (Option.isSome(match) && match.value.info.role === "user") return match.value.info.model
+      // User messages require model metadata, even when no provider is configured.
+      return { providerID: ProviderV2.ID.make("plugin"), modelID: ModelV2.ID.make("command-receipt") }
     })
 
     const createUserMessage = Effect.fn("SessionPrompt.createUserMessage")(function* (input: PromptInput) {
@@ -1366,6 +1382,50 @@ const layer = Layer.effect(
         const error = new NamedError.Unknown({ message: `Command not found: "${input.command}".${hint}` })
         yield* events.publish(Session.Event.Error, { sessionID: input.sessionID, error: error.toObject() })
         throw error
+      }
+      // Validate the session before invoking plugins, including callers outside HTTP.
+      const session = yield* sessions.get(input.sessionID).pipe(Effect.orDie)
+      const intercepted = yield* plugin.trigger(
+        "command.execute.intercept",
+        { command: input.command, sessionID: input.sessionID, arguments: input.arguments },
+        { handled: false, receipt: undefined as string | undefined },
+      )
+      if (intercepted.handled === true) {
+        // Do not use prompt(noReply): a busy runner would treat it as new input.
+        yield* revert.cleanup(session)
+        const info: SessionV1.User = {
+          id: input.messageID ?? MessageID.ascending(),
+          sessionID: input.sessionID,
+          role: "user",
+          commandReceipt: input.command,
+          time: { created: Date.now() },
+          agent: session.agent ?? (yield* agents.defaultInfo()).name,
+          model: yield* receiptModel(session),
+        }
+        const part: SessionV1.TextPart = {
+          id: PartID.ascending(),
+          messageID: info.id,
+          sessionID: input.sessionID,
+          type: "text",
+          text: intercepted.receipt ?? `/${input.command} handled by plugin.`,
+          time: { start: info.time.created, end: info.time.created },
+        }
+        yield* sessions.updateMessage(info)
+        yield* sessions.updatePart(part)
+        yield* sessions.touch(input.sessionID)
+        yield* events.publish(Command.Event.Executed, {
+          name: input.command,
+          sessionID: input.sessionID,
+          arguments: input.arguments,
+          messageID: info.id,
+        })
+        // Command clients may wait for a status event even when no runner started.
+        // Reannounce, rather than changing state or marking an active runner idle.
+        yield* events.publish(SessionStatus.Event.Status, {
+          sessionID: input.sessionID,
+          status: yield* status.get(input.sessionID),
+        })
+        return { info, parts: [part] }
       }
       const agentName = cmd.agent ?? input.agent
 

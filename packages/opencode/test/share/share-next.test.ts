@@ -10,7 +10,7 @@ import { AccessToken, AccountID, OrgID, RefreshToken } from "../../src/account/s
 import { AccountRepo } from "../../src/account/repo"
 import { EventV2Bridge } from "../../src/event-v2-bridge"
 import { Session } from "@/session/session"
-import type { SessionID } from "../../src/session/schema"
+import { MessageID, PartID, type SessionID } from "../../src/session/schema"
 import { ShareNext } from "@/share/share-next"
 import { SessionShareTable } from "@opencode-ai/core/share/sql"
 import { Database } from "@opencode-ai/core/database/database"
@@ -18,6 +18,8 @@ import { eq } from "drizzle-orm"
 import { provideTmpdirInstance } from "../fixture/fixture"
 import { resetDatabase } from "../fixture/db"
 import { pollWithTimeout, testEffect } from "../lib/effect"
+import { ProviderV2 } from "@opencode-ai/core/provider"
+import { ModelV2 } from "@opencode-ai/core/model"
 
 const env = LayerNode.compile(LayerNode.group([CrossSpawnSpawner.node]))
 const it = testEffect(env)
@@ -82,6 +84,59 @@ beforeEach(async () => {
 })
 
 describe("ShareNext", () => {
+  it.live("shares a model-free command receipt without resolving its placeholder model", () =>
+    provideTmpdirInstance(() => {
+      const sent: string[] = []
+      const client = HttpClient.make((req) => {
+        if (req.url.endsWith("/api/share")) {
+          return Effect.succeed(
+            json(req, { id: "shr_abc", url: "https://legacy-share.example.com/share/abc", secret: "sec_123" }),
+          )
+        }
+        if (req.url.endsWith("/sync") && req.body._tag === "Uint8Array") {
+          sent.push(new TextDecoder().decode(req.body.body))
+        }
+        return Effect.succeed(json(req, { ok: true }))
+      })
+
+      return Effect.gen(function* () {
+        const session = yield* Session.Service
+        const info = yield* session.create({ title: "receipt" })
+        const receipt = yield* session.updateMessage({
+          id: MessageID.ascending(),
+          sessionID: info.id,
+          role: "user",
+          commandReceipt: "receipt-demo",
+          agent: "build",
+          model: { providerID: ProviderV2.ID.make("plugin"), modelID: ModelV2.ID.make("command-receipt") },
+          time: { created: Date.now() },
+        })
+        yield* session.updatePart({
+          id: PartID.ascending(),
+          messageID: receipt.id,
+          sessionID: info.id,
+          type: "text",
+          text: "Handled",
+        })
+
+        yield* ShareNext.Service.use((svc) => svc.create(info.id))
+        yield* pollWithTimeout(
+          Effect.sync(() => sent[0]),
+          "timed out waiting for receipt share",
+          "5 seconds",
+        )
+
+        const body = JSON.parse(sent[0]!) as { data: Array<{ type: string; data: unknown }> }
+        expect(
+          body.data.some((item) => item.type === "message" && (item.data as { id?: string }).id === receipt.id),
+        ).toBe(true)
+        expect(
+          body.data.some((item) => item.type === "model" && Array.isArray(item.data) && item.data.length > 0),
+        ).toBe(false)
+      }).pipe(Effect.provide(integrationLayer(client)))
+    }),
+  )
+
   it.live("request uses legacy share API without active org account", () =>
     provideTmpdirInstance(
       () =>

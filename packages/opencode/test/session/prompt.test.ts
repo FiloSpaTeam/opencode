@@ -6,7 +6,7 @@ import { SessionProjector } from "@opencode-ai/core/session/projector"
 import { eq } from "drizzle-orm"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { expect } from "bun:test"
-import { Cause, Deferred, Duration, Effect, Exit, Fiber, Layer } from "effect"
+import { Cause, Deferred, Duration, Effect, Exit, Fiber, Layer, Schema } from "effect"
 import path from "path"
 import { fileURLToPath } from "url"
 import { NamedError } from "@opencode-ai/core/util/error"
@@ -2467,4 +2467,220 @@ noLLMServer.instance(
       }
     }),
   30_000,
+)
+
+it.instance("consumed command stores one literal receipt without expansion or inference", () =>
+  Effect.gen(function* () {
+    const fixture = yield* TestInstance
+    const raw = `!\`touch "${fixture.directory}/expanded-arg"\` $1 @missing-file`
+    const text = `Accepted $1 @missing-file !\`touch "${fixture.directory}/receipt-expanded"\``
+    const { dir, llm } = yield* useServerConfig((url) => ({
+      ...providerCfg(url),
+      command: {
+        "receipt-demo": { template: `!\`touch "${fixture.directory}/expanded-template"\` $ARGUMENTS @missing-file` },
+      },
+    }))
+    const { prompt, sessions, chat } = yield* boot()
+    const other = yield* sessions.create({ title: "Other" })
+    const plugins = yield* Plugin.Service
+    const hooks = yield* plugins.list()
+    const events = yield* EventV2Bridge.Service
+    const statuses: string[] = []
+    const off = yield* events.listen((event) =>
+      Effect.sync(() => {
+        if (event.type !== "session.status") return
+        const data = Schema.decodeUnknownSync(SessionStatus.Event.Status.data)(event.data)
+        if (data.sessionID === chat.id) statuses.push(data.status.type)
+      }),
+    )
+    yield* Effect.addFinalizer(() => off)
+    const seen: string[] = []
+    hooks.push(
+      {
+        "command.execute.intercept": async (input) => {
+          seen.push(`first:${input.sessionID}`)
+        },
+      },
+      {
+        "command.execute.intercept": async (input, output) => {
+          expect(input).toEqual({ command: "receipt-demo", sessionID: chat.id, arguments: raw })
+          seen.push("handled")
+          output.handled = true
+          output.receipt = text
+        },
+      },
+      {
+        "command.execute.intercept": async () => {
+          throw new Error("must not run")
+        },
+      },
+      {
+        "command.execute.before": async () => {
+          throw new Error("must not expand")
+        },
+      },
+    )
+    const inputMessageID = MessageID.ascending()
+    const result = yield* prompt.command({
+      sessionID: chat.id,
+      messageID: inputMessageID,
+      command: "receipt-demo",
+      arguments: raw,
+      model: "nonexistent/model",
+      agent: "nonexistent",
+      parts: [{ type: "file", mime: "text/plain", url: "invalid-attachment-url" }],
+    })
+    expect(seen).toEqual([`first:${chat.id}`, "handled"])
+    expect(result.info.id).toBe(inputMessageID)
+    expect(statuses).toEqual(["idle"])
+    expect(result.info).toMatchObject({ role: "user", sessionID: chat.id, commandReceipt: "receipt-demo" })
+    expect(result.parts).toHaveLength(1)
+    expect(result.parts[0]).toMatchObject({ type: "text", text: text })
+    expect(yield* sessions.messages({ sessionID: chat.id })).toEqual([result])
+    expect(yield* sessions.messages({ sessionID: other.id })).toEqual([])
+    expect(yield* llm.calls).toBe(0)
+    for (const file of ["expanded-template", "expanded-arg", "receipt-expanded"]) {
+      expect(yield* Effect.promise(() => Bun.file(path.join(dir, file)).exists())).toBe(false)
+    }
+    expect(yield* MessageV2.filterCompactedEffect(chat.id)).toEqual([])
+  }),
+)
+
+it.instance("consumed command succeeds without an available model", () =>
+  Effect.gen(function* () {
+    const fixture = yield* TestInstance
+    yield* writeConfig(fixture.directory, {
+      enabled_providers: [],
+      command: { "receipt-demo": { template: "unused" } },
+    })
+    const { prompt, sessions, chat } = yield* boot()
+    const plugins = yield* Plugin.Service
+    const hooks = yield* plugins.list()
+    hooks.push({
+      "command.execute.intercept": async (_input, output) => {
+        output.receipt = "Handled without a model"
+        output.handled = true
+      },
+    })
+
+    const result = yield* prompt.command({ sessionID: chat.id, command: "receipt-demo", arguments: "" })
+
+    expect(result.info).toMatchObject({ role: "user", commandReceipt: "receipt-demo" })
+    expect(result.parts[0]).toMatchObject({ type: "text", text: "Handled without a model" })
+    expect(yield* sessions.messages({ sessionID: chat.id })).toEqual([result])
+    const next = yield* prompt
+      .prompt({ sessionID: chat.id, parts: [{ type: "text", text: "Needs a model" }] })
+      .pipe(Effect.exit)
+    expect(Exit.isFailure(next)).toBe(true)
+    if (Exit.isFailure(next)) expect(Cause.pretty(next.cause)).toContain("No providers are available")
+  }),
+)
+
+it.instance("unconsumed interceptors retain expansion and legacy hooks; errors remain failures", () =>
+  Effect.gen(function* () {
+    const { llm } = yield* useServerConfig((url) => ({
+      ...providerCfg(url),
+      command: { probe: { template: "Hello $ARGUMENTS" } },
+    }))
+    const { prompt, sessions, chat } = yield* boot()
+    const plugins = yield* Plugin.Service
+    const hooks = yield* plugins.list()
+    const seen: string[] = []
+    hooks.push({
+      "command.execute.intercept": async (input) => {
+        seen.push(input.arguments)
+      },
+      "command.execute.before": async () => {
+        seen.push("before")
+      },
+    })
+    yield* llm.text("done")
+    const result = yield* prompt.command({ sessionID: chat.id, command: "probe", arguments: "world" })
+    expect(result.info.role).toBe("assistant")
+    expect(seen).toEqual(["world", "before"])
+    expect(JSON.stringify(yield* llm.inputs)).toContain("Hello world")
+    const before = yield* sessions.messages({ sessionID: chat.id })
+    hooks.push({
+      "command.execute.intercept": async (_input, output) => {
+        output.handled = true
+        throw new Error("handler failed")
+      },
+    })
+    const failed = yield* prompt.command({ sessionID: chat.id, command: "probe", arguments: "fail" }).pipe(Effect.exit)
+    expect(Exit.isFailure(failed)).toBe(true)
+    if (Exit.isFailure(failed)) expect(Cause.pretty(failed.cause)).toContain("handler failed")
+    expect(yield* sessions.messages({ sessionID: chat.id })).toEqual(before)
+    expect(yield* llm.calls).toBe(1)
+  }),
+)
+
+it.instance("consumed command during inference does not abort or continue the busy session", () =>
+  Effect.gen(function* () {
+    const { llm } = yield* useServerConfig((url) => ({
+      ...providerCfg(url),
+      command: { "receipt-demo": { template: "unused" } },
+    }))
+    const { prompt, sessions, chat } = yield* boot()
+    const plugins = yield* Plugin.Service
+    const hooks = yield* plugins.list()
+    hooks.push({
+      "command.execute.intercept": async (_input, output) => {
+        output.handled = true
+      },
+    })
+    const gate = yield* Deferred.make<void>()
+    yield* llm.hold("finished original", deferredAsPromise(gate))
+    const running = yield* prompt
+      .prompt({
+        sessionID: chat.id,
+        parts: [{ type: "text", text: "original task" }],
+      })
+      .pipe(Effect.forkChild)
+    yield* llm.wait(1)
+    const receipt = yield* prompt.command({ sessionID: chat.id, command: "receipt-demo", arguments: "approved" })
+    expect(receipt.parts[0]).toMatchObject({ type: "text", text: "/receipt-demo handled by plugin." })
+    const status = yield* SessionStatus.Service
+    expect((yield* status.get(chat.id)).type).toBe("busy")
+    expect(yield* llm.calls).toBe(1)
+    yield* Deferred.succeed(gate, undefined)
+    const result = yield* Fiber.join(running)
+    expect(result.parts.some((part) => part.type === "text" && part.text === "finished original")).toBe(true)
+    expect((yield* sessions.messages({ sessionID: chat.id })).filter((msg) => msg.info.id === receipt.info.id)).toEqual(
+      [receipt],
+    )
+    expect(yield* llm.calls).toBe(1)
+    yield* llm.text("next task")
+    yield* prompt.prompt({ sessionID: chat.id, parts: [{ type: "text", text: "next" }] })
+    expect(JSON.stringify(yield* llm.inputs)).not.toContain("handled by plugin")
+    expect(yield* llm.calls).toBe(2)
+  }),
+)
+
+it.instance("consumed command after undo commits the revert and keeps its receipt on the next prompt", () =>
+  Effect.gen(function* () {
+    const { llm } = yield* useServerConfig((url) => ({
+      ...providerCfg(url),
+      command: { "receipt-demo": { template: "unused" } },
+    }))
+    const { prompt, sessions, chat } = yield* boot()
+    const old = yield* prompt.prompt({ sessionID: chat.id, noReply: true, parts: [{ type: "text", text: "undone" }] })
+    yield* sessions.setRevert({ sessionID: chat.id, revert: { messageID: old.info.id }, summary: undefined })
+    const plugins = yield* Plugin.Service
+    const hooks = yield* plugins.list()
+    hooks.push({
+      "command.execute.intercept": async (_input, output) => {
+        output.handled = true
+      },
+    })
+    const receipt = yield* prompt.command({ sessionID: chat.id, command: "receipt-demo", arguments: "" })
+    expect((yield* sessions.get(chat.id)).revert).toBeUndefined()
+    expect(yield* sessions.messages({ sessionID: chat.id })).toEqual([receipt])
+    expect(receipt.parts[0]).toMatchObject({
+      time: { start: receipt.info.time.created, end: receipt.info.time.created },
+    })
+    expect(yield* llm.calls).toBe(0)
+    yield* llm.text("next")
+    yield* prompt.prompt({ sessionID: chat.id, parts: [{ type: "text", text: "next task" }] })
+    expect((yield* sessions.messages({ sessionID: chat.id })).some((msg) => msg.info.id === receipt.info.id)).toBe(true)
+  }),
 )

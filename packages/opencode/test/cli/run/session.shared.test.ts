@@ -106,6 +106,18 @@ function filePart(id: string, messageID: string, url: string, input: Partial<Fil
 }
 
 describe("run session shared", () => {
+  test("command receipts do not become resumable prompt turns", () => {
+    const receipt = userMessage("msg-receipt", [textPart("txt-receipt", "msg-receipt", "Handled")])
+    if (receipt.info.role !== "user") throw new Error("Expected a user message")
+    receipt.info.commandReceipt = "receipt-demo"
+    receipt.info.model = { providerID: "plugin", modelID: "command-receipt" }
+
+    const out = createSession([userMessage("msg-user", [textPart("txt-user", "msg-user", "first")]), receipt])
+
+    expect(out.turns).toHaveLength(1)
+    expect(out.turns[0]?.prompt.text).toBe("first")
+  })
+
   test("builds user prompt text from text, file, and agent parts", () => {
     const msgs: SessionMessages = [
       assistantMessage("msg-assistant-1", [textPart("txt-assistant-1", "msg-assistant-1", "ignore me")]),

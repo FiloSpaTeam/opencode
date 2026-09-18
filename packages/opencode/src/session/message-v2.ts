@@ -197,6 +197,7 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
   }
 
   for (const msg of input) {
+    if (msg.info.role === "user" && msg.info.commandReceipt !== undefined) continue
     if (msg.parts.length === 0) continue
 
     if (msg.info.role === "user") {
@@ -527,6 +528,7 @@ export function filterCompacted(msgs: Iterable<WithParts>) {
   const completed = new Set<string>()
   let retain: MessageID | undefined
   for (const msg of msgs) {
+    if (msg.info.role === "user" && msg.info.commandReceipt !== undefined) continue
     result.push(msg)
     if (retain) {
       if (msg.info.id === retain) break
@@ -588,6 +590,7 @@ export function latest(msgs: WithParts[]) {
   let assistant: Assistant | undefined
   let finished: Assistant | undefined
   for (const msg of msgs) {
+    if (msg.info.role === "user" && msg.info.commandReceipt !== undefined) continue
     const info = msg.info
     if (info.role === "user" && isAfter(info, user)) user = info
     if (info.role === "assistant" && isAfter(info, assistant)) assistant = info

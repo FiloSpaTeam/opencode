@@ -186,7 +186,7 @@ const layer = Layer.effect(
           Effect.gen(function* () {
             const info = data.info
             yield* sync(info.sessionID, [{ type: "message", data: structuredClone(info) as SDK.Message }])
-            if (info.role !== "user") return
+            if (info.role !== "user" || info.commandReceipt !== undefined) return
             const model = yield* provider.getModel(info.model.providerID, info.model.modelID)
             yield* sync(info.sessionID, [{ type: "model", data: [model] }])
           }),
@@ -280,7 +280,7 @@ const layer = Layer.effect(
         Array.from(
           new Map(
             messages
-              .filter((msg) => msg.info.role === "user")
+              .filter((msg) => msg.info.role === "user" && msg.info.commandReceipt === undefined)
               .map((msg) => (msg.info as SDK.UserMessage).model)
               .map((item) => [`${item.providerID}/${item.modelID}`, item] as const),
           ).values(),

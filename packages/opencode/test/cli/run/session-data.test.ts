@@ -35,7 +35,7 @@ function assistant(id: string, extra: Record<string, unknown> = {}) {
   }
 }
 
-function user(id: string) {
+function user(id: string, commandReceipt?: string) {
   return {
     type: "message.updated",
     properties: {
@@ -43,6 +43,7 @@ function user(id: string) {
       info: {
         id,
         role: "user",
+        ...(commandReceipt !== undefined ? { commandReceipt } : {}),
       },
     },
   }
@@ -160,6 +161,28 @@ describe("run session data", () => {
 
     expect(out.commits).toEqual([])
     expect(out.data.ids.has("txt-user-1")).toBe(true)
+  })
+
+  test("renders a command receipt after its text arrives before the message", () => {
+    let data = createSessionData()
+    data = reduce(data, text({ id: "txt-receipt", messageID: "msg-receipt", text: "Handled", time: { end: 1 } })).data
+
+    const out = reduce(data, user("msg-receipt", "receipt-demo"))
+
+    expect(out.commits).toContainEqual(
+      expect.objectContaining({ kind: "user", source: "system", text: "Handled", partID: "txt-receipt" }),
+    )
+  })
+
+  test("renders a command receipt when its message arrives first", () => {
+    let data = createSessionData()
+    data = reduce(data, user("msg-receipt", "receipt-demo")).data
+
+    const out = reduce(data, text({ id: "txt-receipt", messageID: "msg-receipt", text: "Handled", time: { end: 1 } }))
+
+    expect(out.commits).toContainEqual(
+      expect.objectContaining({ kind: "user", source: "system", text: "Handled", partID: "txt-receipt" }),
+    )
   })
 
   test("suppresses reasoning commits when thinking is disabled", () => {

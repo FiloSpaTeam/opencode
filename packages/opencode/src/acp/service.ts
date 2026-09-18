@@ -564,7 +564,7 @@ export function make(input: {
           "session",
         )
         yield* sendUsageUpdate(input.usage, input.sdk, input.connection, current.id, current.cwd)
-        return yield* promptResponse(response.info, params.messageId)
+        return yield* promptResponse(response.info.role === "assistant" ? response.info : undefined, params.messageId)
       }
 
       if (command.name === "compact") {
@@ -712,6 +712,7 @@ type SdkResponse<T> = {
 type MessageInfo = {
   readonly role?: Message["role"]
   readonly model?: Extract<Message, { role: "user" }>["model"]
+  readonly commandReceipt?: Extract<Message, { role: "user" }>["commandReceipt"]
   readonly providerID?: Extract<Message, { role: "assistant" }>["providerID"]
   readonly modelID?: Extract<Message, { role: "assistant" }>["modelID"]
   readonly variant?: Extract<Message, { role: "assistant" }>["variant"]
@@ -1157,7 +1158,11 @@ function sameModel(left: Directory.DefaultModel, right: Directory.DefaultModel |
 
 function restoreFromMessages(messages: readonly MessageInfo[]) {
   const user = messages.findLast(
-    (message) => message.role === "user" && message.model?.providerID && message.model.modelID,
+    (message) =>
+      message.role === "user" &&
+      message.commandReceipt === undefined &&
+      message.model?.providerID &&
+      message.model.modelID,
   )
   if (user?.model?.providerID && user.model.modelID) {
     return {

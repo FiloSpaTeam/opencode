@@ -109,6 +109,35 @@ const tokens = {
 
 describe("revert + compact workflow", () => {
   it.live(
+    "reverts to the prior prompt when a command receipt precedes an assistant reply",
+    provideTmpdirInstance((dir) =>
+      Effect.gen(function* () {
+        const session = yield* Session.Service
+        const revert = yield* SessionRevert.Service
+        const info = yield* session.create({})
+        const prompt = yield* user(info.id)
+        yield* text(info.id, prompt.id, "Original prompt")
+        const receipt = yield* session.updateMessage({
+          id: MessageID.ascending(),
+          role: "user",
+          commandReceipt: "receipt-demo",
+          sessionID: info.id,
+          agent: "default",
+          model: prompt.model,
+          time: { created: Date.now() },
+        })
+        yield* text(info.id, receipt.id, "Handled")
+        const reply = yield* assistant(info.id, prompt.id, dir)
+        yield* text(info.id, reply.id, "Assistant reply")
+
+        const result = yield* revert.revert({ sessionID: info.id, messageID: reply.id })
+
+        expect(result.revert?.messageID).toBe(prompt.id)
+      }),
+    ),
+  )
+
+  it.live(
     "should properly handle compact command after revert",
     provideTmpdirInstance(
       (dir) =>

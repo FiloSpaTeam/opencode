@@ -45,7 +45,7 @@ type Tokens = {
 }
 
 type PartKind = "assistant" | "reasoning" | "user"
-type MessageRole = "assistant" | "user"
+type MessageRole = "assistant" | "user" | "receipt"
 type Dict = Record<string, unknown>
 type SessionCommit = StreamCommit
 
@@ -55,7 +55,7 @@ type SessionCommit = StreamCommit
 // - ids:    parts and error keys we've already committed (dedup guard)
 // - tools:  tool parts we've emitted a "start" for but not yet completed
 // - call:   tool call inputs, keyed by msg:call, for enriching permission views
-// - role:   message ID → "assistant" | "user", learned from message.updated
+// - role:   message ID → assistant, user, or command receipt, learned from message.updated
 // - msg:    part ID → message ID
 // - part:   part ID → "assistant" | "reasoning" (text parts only)
 // - text:   part ID → full accumulated text so far
@@ -420,10 +420,9 @@ function toolStatus(part: ToolPart): string {
 
 // Returns true if we can flush this part's text to scrollback.
 //
-// We gate on the message role being "assistant" because user-role messages
-// also contain text parts (the user's own input) which we don't want to
-// echo. If we haven't received the message.updated event yet, we return
-// false and the text stays buffered until replay() flushes it.
+// Ordinary user text is already visible in the prompt and should not be echoed.
+// Receipts are user-role messages that must be shown. Until message.updated
+// identifies the role, keep the text buffered for replay().
 function ready(data: SessionData, partID: string): boolean {
   const msg = data.msg.get(partID)
   if (!msg) {
@@ -435,7 +434,7 @@ function ready(data: SessionData, partID: string): boolean {
     return false
   }
 
-  if (role === "assistant") {
+  if (role === "assistant" || role === "receipt") {
     return true
   }
 
@@ -577,8 +576,8 @@ function drop(data: SessionData, partID: string) {
 }
 
 // Called when we learn a message's role (from message.updated). Flushes any
-// buffered text parts that were waiting on role confirmation. User-role
-// parts are silently dropped.
+// buffered text parts that were waiting on role confirmation. Ordinary user
+// parts are silently dropped; command receipts are shown.
 function replay(data: SessionData, commits: SessionCommit[], messageID: string, role: MessageRole, thinking: boolean) {
   for (const [partID, msg] of data.msg.entries()) {
     if (msg !== messageID || data.ids.has(partID)) {
@@ -596,7 +595,7 @@ function replay(data: SessionData, commits: SessionCommit[], messageID: string, 
       continue
     }
 
-    if (role === "user" && kind === "assistant") {
+    if ((role === "user" || role === "receipt") && kind === "assistant") {
       data.part.set(partID, "user")
     }
 
@@ -829,8 +828,9 @@ export function reduceSessionData(input: SessionDataInput): SessionDataOutput {
 
     const info = event.properties.info
     if (typeof info.id === "string") {
-      data.role.set(info.id, info.role)
-      replay(data, commits, info.id, info.role, input.thinking)
+      const role = info.role === "user" && info.commandReceipt !== undefined ? "receipt" : info.role
+      data.role.set(info.id, role)
+      replay(data, commits, info.id, role, input.thinking)
     }
 
     if (info.role !== "assistant") {
@@ -1027,7 +1027,7 @@ export function reduceSessionData(input: SessionDataInput): SessionDataOutput {
       return out(data, commits)
     }
 
-    data.part.set(part.id, role === "user" && kind === "assistant" ? "user" : kind)
+    data.part.set(part.id, (role === "user" || role === "receipt") && kind === "assistant" ? "user" : kind)
     syncText(data, part.id, part.text)
 
     if (part.time?.end) {

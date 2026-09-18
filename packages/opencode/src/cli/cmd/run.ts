@@ -22,7 +22,7 @@ import { UI } from "../ui"
 import { effectCmd } from "../effect-cmd"
 import { EOL } from "os"
 import { Filesystem } from "@/util/filesystem"
-import { createOpencodeClient, type OpencodeClient, type ToolPart } from "@opencode-ai/sdk/v2"
+import { createOpencodeClient, type OpencodeClient, type ToolPart, type TextPart } from "@opencode-ai/sdk/v2"
 import { FormatError, FormatUnknownError } from "../error"
 import { INTERACTIVE_INPUT_ERROR, resolveInteractiveStdin } from "./run/runtime.stdin"
 
@@ -690,6 +690,20 @@ export const RunCommand = effectCmd({
           return false
         }
 
+        const receipts = new Set<string>()
+        function printText(part: TextPart) {
+          if (emit("text", { part })) return
+          const text = part.text.trim()
+          if (!text) return
+          if (!process.stdout.isTTY) {
+            process.stdout.write(text + EOL)
+            return
+          }
+          UI.empty()
+          UI.println(text)
+          UI.empty()
+        }
+
         // Consume one subscribed event stream for the active session and mirror it
         // to stdout/UI. `client` is passed explicitly because attach mode may
         // rebind the SDK to the session's directory after the subscription is
@@ -700,6 +714,13 @@ export const RunCommand = effectCmd({
           let error: string | undefined
 
           for await (const event of events.stream) {
+            if (
+              event.type === "message.updated" &&
+              event.properties.info.role === "user" &&
+              event.properties.info.commandReceipt !== undefined
+            ) {
+              receipts.add(event.properties.info.id)
+            }
             if (event.type === "session.created" && event.properties.info.parentID) {
               if (sessions.has(event.properties.info.parentID)) sessions.add(event.properties.info.id)
             }
@@ -750,18 +771,7 @@ export const RunCommand = effectCmd({
                 if (emit("step_finish", { part })) continue
               }
 
-              if (part.type === "text" && part.time?.end) {
-                if (emit("text", { part })) continue
-                const text = part.text.trim()
-                if (!text) continue
-                if (!process.stdout.isTTY) {
-                  process.stdout.write(text + EOL)
-                  continue
-                }
-                UI.empty()
-                UI.println(text)
-                UI.empty()
-              }
+              if (part.type === "text" && part.time?.end && !receipts.has(part.messageID)) printText(part)
 
               if (part.type === "reasoning" && part.time?.end && thinking) {
                 if (emit("reasoning", { part })) continue
@@ -855,6 +865,13 @@ export const RunCommand = effectCmd({
               if (!emit("error", { error: result.error })) UI.error(formatRunError(result.error))
               process.exitCode = 1
               return
+            }
+            // Attach callers can finish before SSE delivers the receipt. Print the
+            // command response; the stream skips marked receipts to avoid duplicates.
+            if (result.data?.info.role === "user" && result.data.info.commandReceipt !== undefined) {
+              for (const part of result.data.parts) {
+                if (part.type === "text") printText(part)
+              }
             }
             await finish()
             return

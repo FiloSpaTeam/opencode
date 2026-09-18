@@ -10,7 +10,7 @@ import type {
   SessionConfigSelectOption,
   SetSessionConfigOptionResponse,
 } from "@agentclientprotocol/sdk"
-import type { AssistantMessage, Event, OpencodeClient } from "@opencode-ai/sdk/v2"
+import type { AssistantMessage, Event, OpencodeClient, UserMessage } from "@opencode-ai/sdk/v2"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { Effect } from "effect"
@@ -209,6 +209,7 @@ describe("ACP service sessions", () => {
         }
       }>
       prompt?: (input: unknown) => Promise<{ data: { info: ReturnType<typeof assistantInfo> } }>
+      command?: () => Promise<{ data: { info: UserMessage } }>
       sessionUpdate?: (update: SessionNotification) => Promise<void>
     },
   ) => {
@@ -282,6 +283,7 @@ describe("ACP service sessions", () => {
         command: (input: { sessionID: string }) => {
           commands.push(input)
           events.push(idleEvent(input.sessionID))
+          if (options?.command) return options.command()
           return Promise.resolve({
             data: {
               info: assistantInfo({
@@ -807,6 +809,15 @@ describe("ACP service sessions", () => {
           role: "user",
           model: { providerID: "test", modelID: "test-model", variant: "high" },
           agent: "plan",
+        },
+        parts: [],
+      },
+      {
+        info: {
+          role: "user",
+          commandReceipt: "receipt-demo",
+          model: { providerID: "plugin", modelID: "command-receipt" },
+          agent: "build",
         },
         parts: [],
       },
@@ -1550,6 +1561,34 @@ describe("ACP service sessions", () => {
       },
     ])
     expect(result.usage).toEqual({ inputTokens: 3, outputTokens: 4, totalTokens: 7 })
+  })
+
+  it("consumed slash commands return end_turn without assistant token usage", async () => {
+    const { service, prompts } = makeService([], {
+      command: async () => ({
+        data: {
+          info: {
+            id: "msg_receipt",
+            sessionID: "ses_new",
+            role: "user",
+            commandReceipt: "init",
+            time: { created: 1 },
+            agent: "build",
+            model: { providerID: "test", modelID: "test-model" },
+          },
+        },
+      }),
+    })
+    const session = await Effect.runPromise(service.newSession({ cwd: "/workspace", mcpServers: [] }))
+    const result = await Effect.runPromise(
+      service.prompt({
+        sessionId: session.sessionId,
+        prompt: [{ type: "text", text: "/init now" }],
+      }),
+    )
+    expect(result.stopReason).toBe("end_turn")
+    expect(result.usage).toBeUndefined()
+    expect(prompts).toEqual([])
   })
 
   it("compact slash command calls summarize path", async () => {

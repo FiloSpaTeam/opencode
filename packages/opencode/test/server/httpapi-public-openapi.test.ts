@@ -348,3 +348,15 @@ describe("PublicApi OpenAPI v2 errors", () => {
     )
   })
 })
+
+test("command responses describe both assistant messages and plugin receipts", () => {
+  const spec = OpenApi.fromApi(PublicApi) as OpenApiSpec
+  const response =
+    spec.paths["/session/{sessionID}/command"].post?.responses?.["200"]?.content?.["application/json"]?.schema
+  const schema = response?.$ref ? spec.components.schemas[componentName(response.$ref)] : response
+  const info = schema?.properties?.info
+  const message = info?.$ref ? spec.components.schemas[componentName(info.$ref)] : info
+  expect(message?.anyOf?.map((item) => item.$ref)).toEqual(
+    expect.arrayContaining(["#/components/schemas/UserMessage", "#/components/schemas/AssistantMessage"]),
+  )
+})

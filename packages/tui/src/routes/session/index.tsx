@@ -617,7 +617,9 @@ export function Session() {
       run: async () => {
         const status = sync.data.session_status?.[route.sessionID]
         if (status?.type !== "idle") await sdk.client.session.abort({ sessionID: route.sessionID }).catch(() => {})
-        const message = messagesBeforeRevert().findLast((item) => item.role === "user")
+        const message = messagesBeforeRevert().findLast(
+          (item) => item.role === "user" && item.commandReceipt === undefined,
+        )
         if (!message) return
         void sdk.client.session
           .revert({
@@ -655,7 +657,7 @@ export function Session() {
         dialog.clear()
         const messageID = session()?.revert?.messageID
         if (!messageID) return
-        const message = messages().find((x) => x.role === "user" && x.id > messageID)
+        const message = messages().find((x) => x.role === "user" && x.commandReceipt === undefined && x.id > messageID)
         if (!message) {
           void sdk.client.session.unrevert({
             sessionID: route.sessionID,
@@ -1136,7 +1138,7 @@ export function Session() {
     if (index === -1) return []
     return messages()
       .slice(index)
-      .filter((message) => message.role === "user")
+      .filter((message) => message.role === "user" && message.commandReceipt === undefined)
   })
 
   const revert = createMemo(() => {

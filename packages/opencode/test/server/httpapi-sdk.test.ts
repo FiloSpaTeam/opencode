@@ -1,7 +1,7 @@
 import { afterEach, describe, expect } from "bun:test"
 import { ConfigV1 } from "@opencode-ai/core/v1/config/config"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
-import { Deferred, Effect, Layer } from "effect"
+import { ConfigProvider, Deferred, Effect, Layer } from "effect"
 import type * as Scope from "effect/Scope"
 import { HttpServer } from "effect/unstable/http"
 import { ChildProcessSpawner } from "effect/unstable/process"
@@ -911,3 +911,147 @@ describe("HttpApi SDK", () => {
     ),
   )
 })
+
+testEffect(
+  Layer.mergeAll(
+    appLayer,
+    httpApiLayer.pipe(
+      Layer.provide(ConfigProvider.layer(ConfigProvider.fromUnknown({ OPENCODE_SERVER_PASSWORD: "command-secret" }))),
+    ),
+  ),
+).live(
+  "command interception returns a successful receipt through the real server and SDK",
+  withFakeLlmProject(
+    "raw",
+    {
+      setup: (dir) =>
+        FSUtil.Service.use((fs) =>
+          Effect.all([
+            fs.writeWithDirs(
+              path.join(dir, ".opencode", "commands", "receipt-demo.md"),
+              "---\ndescription: Receipt test\n---\n!`touch should-not-exist` $ARGUMENTS",
+            ),
+            fs.writeWithDirs(
+              path.join(dir, ".opencode", "plugin", "receipt.ts"),
+              `export default async (host) => ({
+            "command.execute.intercept": async (input, output) => {
+              if (!host.capabilities?.commandExecuteIntercept) throw new Error("capability missing")
+              if (input.arguments === "fail") throw new Error("real handler failure")
+              output.handled = true
+              output.receipt = "Received for " + input.sessionID + ": " + input.arguments
+            },
+            "command.execute.before": async () => { throw new Error("legacy hook must not run") },
+          })`,
+            ),
+          ]).pipe(Effect.asVoid),
+        ),
+    },
+    ({ llm, directory }) =>
+      Effect.gen(function* () {
+        const sdk = yield* client("raw", directory, {
+          password: "command-secret",
+          headers: { Authorization: authorization("opencode", "command-secret") },
+        })
+        const created = yield* call(() => sdk.session.create({ title: "receipt" }))
+        const sessionID = created.data!.id
+        const other = yield* call(() => sdk.session.create({ title: "other" }))
+        const raw = "!`touch should-not-exist` $1 @missing"
+        const command = yield* call(() => sdk.session.command({ sessionID, command: "receipt-demo", arguments: raw }))
+        expect({ status: command.response.status, error: command.error }).toEqual({ status: 200, error: undefined })
+        expect(command.error).toBeUndefined()
+        expect(command.data?.info).toMatchObject({ role: "user", sessionID, commandReceipt: "receipt-demo" })
+        expect(command.data?.parts).toHaveLength(1)
+        expect(command.data?.parts[0]).toMatchObject({ type: "text", text: `Received for ${sessionID}: ${raw}` })
+        const messages = yield* call(() => sdk.session.messages({ sessionID }))
+        expect(messages.data).toEqual([command.data!])
+        expect((yield* call(() => sdk.session.messages({ sessionID: other.data!.id }))).data).toEqual([])
+        expect(yield* llm.calls).toBe(0)
+        expect(yield* Effect.promise(() => Bun.file(path.join(directory, "should-not-exist")).exists())).toBe(false)
+        const failed = yield* call(() => sdk.session.command({ sessionID, command: "receipt-demo", arguments: "fail" }))
+        expect(failed.response.status).toBe(500)
+        expect(failed.error).toBeDefined()
+        const unknown = yield* call(() => sdk.session.command({ sessionID, command: "unknown", arguments: raw }))
+        expect(unknown.response.ok).toBe(false)
+        const missing = yield* call(() =>
+          sdk.session.command({ sessionID: "ses_missing", command: "receipt-demo", arguments: raw }),
+        )
+        expect(missing.response.status).toBe(404)
+        const unauthenticated = yield* client("raw", directory, { password: "command-secret" })
+        yield* expectStatus(
+          () => unauthenticated.session.command({ sessionID, command: "receipt-demo", arguments: raw }),
+          401,
+        )
+        const authenticated = yield* client("raw", directory, {
+          password: "command-secret",
+          headers: { Authorization: authorization("opencode", "command-secret") },
+        })
+        const final = yield* call(() => authenticated.session.messages({ sessionID }))
+        expect(final.data).toEqual(messages.data)
+        {
+          const { createOpencodeClient } = yield* Effect.promise(() => import("@opencode-ai/sdk"))
+          const legacy = createOpencodeClient({
+            baseUrl: "http://localhost",
+            directory,
+            headers: { Authorization: authorization("opencode", "command-secret") },
+            fetch: yield* serverFetch("raw", { password: "command-secret" }),
+          })
+          const receipt = yield* call(() =>
+            legacy.session.command({
+              path: { id: other.data!.id },
+              body: { command: "receipt-demo", arguments: "legacy" },
+            }),
+          )
+          expect(receipt.response.status).toBe(200)
+          expect(receipt.data?.info.role).toBe("user")
+          if (receipt.data?.info.role === "user") expect(receipt.data.info.commandReceipt).toBe("receipt-demo")
+          const stored = yield* call(() => authenticated.session.messages({ sessionID: other.data!.id }))
+          expect(stored.data?.map((message) => message.info.id)).toEqual([receipt.data!.info.id])
+        }
+        const server = yield* HttpServer.HttpServer
+        const cli = yield* Effect.acquireRelease(
+          Effect.sync(() =>
+            Bun.spawn(
+              [
+                process.execPath,
+                "run",
+                "./src/index.ts",
+                "run",
+                "--attach",
+                HttpServer.formatAddress(server.address),
+                "--dir",
+                directory,
+                "--session",
+                sessionID,
+                "--command",
+                "receipt-demo",
+                "--format",
+                "json",
+                "cli-receipt",
+              ],
+              {
+                cwd: path.resolve(import.meta.dir, "../.."),
+                env: { ...process.env, OPENCODE_SERVER_PASSWORD: "command-secret" },
+                stdin: "ignore",
+                stdout: "pipe",
+                stderr: "pipe",
+              },
+            ),
+          ),
+          (cli) => Effect.sync(() => cli.kill()),
+        )
+        const output = yield* awaitWithTimeout(
+          Effect.promise(async () => ({
+            stdout: await new Response(cli.stdout).text(),
+            stderr: await new Response(cli.stderr).text(),
+            code: await cli.exited,
+          })),
+          "receipt CLI did not exit",
+          "15 seconds",
+        )
+        expect(output.code).toBe(0)
+        expect(output.stdout).toContain(`Received for ${sessionID}: cli-receipt`)
+        expect(output.stdout.trim().split("\n")).toHaveLength(1)
+        expect(yield* llm.calls).toBe(0)
+      }),
+  ),
+)

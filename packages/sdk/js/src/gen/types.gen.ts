@@ -45,6 +45,7 @@ export type FileDiff = {
 }
 
 export type UserMessage = {
+  commandReceipt?: string
   id: string
   sessionID: string
   role: "user"
@@ -2767,7 +2768,7 @@ export type SessionCommandResponses = {
    * Created message
    */
   200: {
-    info: AssistantMessage
+    info: Message
     parts: Array<Part>
   }
 }

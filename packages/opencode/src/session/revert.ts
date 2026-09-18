@@ -44,7 +44,7 @@ const layer = Layer.effect(
       let rev: Session.Info["revert"]
       const patches: Snapshot.Patch[] = []
       for (const msg of all) {
-        if (msg.info.role === "user") lastUser = msg.info
+        if (msg.info.role === "user" && msg.info.commandReceipt === undefined) lastUser = msg.info
         const remaining = []
         for (const part of msg.parts) {
           if (rev) {
